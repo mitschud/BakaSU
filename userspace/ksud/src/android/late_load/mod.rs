@@ -44,7 +44,12 @@ fn dump_process_info(label: &str) {
     );
 }
 
-pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Result<()> {
+pub fn run(
+    package_name: &String,
+    kmi: Option<String>,
+    allow_shell: bool,
+    soft_reboot: bool,
+) -> Result<()> {
     utils::daemonize(false)?;
     info!("late-load command triggered!");
     dump_process_info("late-load start");
@@ -144,14 +149,18 @@ pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Res
     // 14. Execute boot-completed stage scripts (non-blocking)
     init_event::run_stage("boot-completed", ScriptWait::NoWait);
 
-    // 15. Restart Manager so it gets a fresh ksu fd from the newly loaded kernel module
-    info!("Restarting KernelSU Manager {package_name}...");
-    let _ = Command::new("am")
-        .args(["force-stop", package_name])
-        .status();
-    let _ = Command::new("am")
-        .args(["start", "-n", &format!("{package_name}/.ui.MainActivity")])
-        .status();
+    // 15. Restart Manager so it gets a fresh ksu fd from the newly loaded kernel module.
+    // Skipped when a soft reboot was asked for: the reboot restarts the framework and the
+    // manager anyway, and force-stopping it here races the shutdown.
+    if !soft_reboot {
+        info!("Restarting KernelSU Manager {package_name}...");
+        let _ = Command::new("am")
+            .args(["force-stop", package_name])
+            .status();
+        let _ = Command::new("am")
+            .args(["start", "-n", &format!("{package_name}/.ui.MainActivity")])
+            .status();
+    }
 
     Ok(())
 }

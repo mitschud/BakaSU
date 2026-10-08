@@ -79,6 +79,10 @@ enum Commands {
         /// manager package name
         #[arg(long, default_value_t = String::from(defs::DEFAULT_PACKAGE_NAME))]
         package_name: String,
+
+        /// Trigger soft-reboot after late-load completes
+        #[arg(long)]
+        soft_reboot: bool,
     },
 
     /// Manage auto apply user custom umount configs
@@ -735,6 +739,7 @@ pub fn run() -> Result<()> {
             post_magica,
             kmi,
             package_name,
+            soft_reboot,
         } => {
             if let Some(port) = magica {
                 return crate::android::late_load::magica::run(port, &package_name, allow_shell)
@@ -743,12 +748,17 @@ pub fn run() -> Result<()> {
                         e
                     });
             }
-            let result = crate::android::late_load::run(&package_name, kmi, allow_shell);
+            let result =
+                crate::android::late_load::run(&package_name, kmi, allow_shell, soft_reboot);
             if post_magica {
                 info!("Restoring adb properties (post-magica cleanup)...");
                 if let Err(e) = crate::android::late_load::magica::disable_adb_root() {
                     error!("disable adb root failed: {e}");
                 }
+            }
+            if soft_reboot && result.is_ok() {
+                info!("Performing soft-reboot...");
+                crate::android::soft_reboot::soft_reboot()?;
             }
             result
         }
