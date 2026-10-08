@@ -28,6 +28,8 @@
 #include "selinux/selinux.h"
 #include "hook/setuid_hook.h"
 #include "compat/kernel_compat.h"
+#include "compat/samsung_defex.h"
+#include "ksu_samsung_kdp.h"
 
 #include "feature/sulog.h"
 #include "feature/adb_root.h"
@@ -233,6 +235,24 @@ int __init kernelsu_init(void)
     }
 
     ksu_init_symbol_resolver();
+
+    // Samsung KDP/DEFEX must be resolved before any su grant can happen, and
+    // before ksu_cred is ever released (ksu_put_cred is KDP-aware). Both are
+    // no-ops unless CONFIG_KSU_SAMSUNG_KDP / _DEFEX were set at build time.
+    {
+        int rc = ksu_samsung_kdp_init();
+        if (rc) {
+            ksu_put_cred(ksu_cred);
+            return rc;
+        }
+        rc = ksu_samsung_defex_init();
+        if (rc) {
+            ksu_put_cred(ksu_cred);
+            ksu_samsung_kdp_exit();
+            return rc;
+        }
+    }
+
     ksu_selinux_init();
     ksu_feature_init();
     ksu_sulog_init();
@@ -322,7 +342,9 @@ void __exit kernelsu_exit(void)
     ksu_feature_exit();
     ksu_module_load_filter_hook_exit();
 
-    put_cred(ksu_cred);
+    ksu_samsung_defex_exit();
+    ksu_put_cred(ksu_cred);
+    ksu_samsung_kdp_exit();
 }
 
 #if NEED_OWN_STACKPROTECTOR
