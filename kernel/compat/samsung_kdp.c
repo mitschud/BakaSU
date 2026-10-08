@@ -63,6 +63,14 @@ static void __nocfi samsung_kdp_commit_worker(struct work_struct *work)
     struct cred *ro_cred;
     bool user_changed;
 
+    pr_info("Samsung KDP worker entered for pid=%d\n", task_pid_nr(target));
+
+    if (!prepare_ro_creds_fn || !kdp_assign_pgd_fn) {
+        pr_err("Samsung KDP worker: credential functions are NULL\n");
+        commit_work->result = -ENOENT;
+        goto out;
+    }
+
     if (!uid_eq(current_euid(), GLOBAL_ROOT_UID)) {
         commit_work->result = -EPERM;
         goto out;
@@ -75,11 +83,14 @@ static void __nocfi samsung_kdp_commit_worker(struct work_struct *work)
         goto out;
     }
 
+    pr_info("Samsung KDP calling prepare_ro_creds fn=%px rw=%px\n", (void *)prepare_ro_creds_fn, commit_work->rw_cred);
     ro_cred = prepare_ro_creds_fn(commit_work->rw_cred, SAMSUNG_KDP_COPY_CREDS, (u64)target);
     if (!ro_cred) {
+        pr_err("Samsung KDP prepare_ro_creds returned NULL\n");
         commit_work->result = -EIO;
         goto out;
     }
+    pr_info("Samsung KDP prepare_ro_creds ok ro=%px\n", ro_cred);
 
     user_changed = ro_cred->user != old_cred->user;
     if (user_changed) {
@@ -92,7 +103,9 @@ static void __nocfi samsung_kdp_commit_worker(struct work_struct *work)
 
     rcu_assign_pointer(target->real_cred, ro_cred);
     rcu_assign_pointer(target->cred, ro_cred);
+    pr_info("Samsung KDP calling kdp_assign_pgd fn=%px\n", (void *)kdp_assign_pgd_fn);
     kdp_assign_pgd_fn(target);
+    pr_info("Samsung KDP kdp_assign_pgd returned\n");
 
     if (user_changed) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
@@ -190,6 +203,7 @@ int ksu_samsung_kdp_commit_creds(struct cred *cred)
     commit_work.result = -EIO;
 
     get_task_struct(commit_work.target);
+    pr_info("Samsung KDP install requested comm=%s pid=%d cred=%px\n", current->comm, task_pid_nr(current), cred);
     queued = schedule_work(&commit_work.work);
     if (!queued) {
         put_task_struct(commit_work.target);
@@ -198,6 +212,8 @@ int ksu_samsung_kdp_commit_creds(struct cred *cred)
 
     wait_for_completion(&commit_work.completion);
     put_task_struct(commit_work.target);
+    pr_info("Samsung KDP install completed comm=%s pid=%d result=%d\n", current->comm, task_pid_nr(current),
+            commit_work.result);
     return commit_work.result;
 #else
     return commit_creds(cred);

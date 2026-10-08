@@ -1,6 +1,7 @@
 #include <linux/cred.h>
 #include <linux/errno.h>
 #include <linux/kprobes.h>
+#include <linux/pid.h>
 #include <linux/sched.h>
 
 #include "compat/samsung_defex.h"
@@ -92,6 +93,8 @@ void ksu_samsung_defex_sync_current(void)
     }
 
     ret = defex_set_task_creds(current, stored_uid, stored_fsuid, stored_egid, cred_flags);
+    pr_info("Samsung DEFEX sync comm=%s pid=%d get_ok set_ret=%d stored uid=%u fsuid=%u egid=%u flags=%u\n",
+            current->comm, task_pid_nr(current), ret, stored_uid, stored_fsuid, stored_egid, (unsigned int)cred_flags);
     if (ret)
         pr_err("Samsung DEFEX credential synchronization failed: %d\n", ret);
 #endif
