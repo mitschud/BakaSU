@@ -15,6 +15,26 @@ config KSU_DEBUG
 	  help
 		Enable KernelSU debug mode.
 
+config KSU_SAMSUNG_KDP
+	  bool "Samsung KDP credential handling"
+	  depends on KSU
+	  default n
+	  help
+	    Install root credentials through Samsung's prepare_ro_creds /
+	    kdp_assign_pgd path instead of plain commit_creds(). Only useful on
+	    Samsung kernels that carry Kernel Data Protection; the symbols do not
+	    exist anywhere else. Enable when building kernelsu.ko for those
+	    kernels, leave off for GKI.
+
+config KSU_SAMSUNG_DEFEX
+	  bool "Samsung DEFEX credential synchronization"
+	  depends on KSU
+	  default n
+	  help
+	    Keep Samsung's DEFEX per-task credential copy in sync after a su grant
+	    and bypass task_defex_enforce for KSU tasks. Requires the Samsung-only
+	    get_task_creds / set_task_creds / task_defex_enforce symbols.
+
 config KSU_TOOLKIT_SUPPORT
       bool "KernelSU toolkit support"
       depends on KSU
