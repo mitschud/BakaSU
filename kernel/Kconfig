@@ -35,6 +35,18 @@ config KSU_SAMSUNG_DEFEX
 	    and bypass task_defex_enforce for KSU tasks. Requires the Samsung-only
 	    get_task_creds / set_task_creds / task_defex_enforce symbols.
 
+config KSU_RKP_NO_PATCH_TEXT
+	  bool "Do not patch kernel text (Samsung RKP / locked bootloader)"
+	  depends on KSU && ARM64
+	  default n
+	  help
+	    Samsung kernels with KDP/RKP stage-2 write protection kill the kernel
+	    when a module writes to kernel text or to sys_call_table. With this
+	    option ksu_patch_text() returns -EOPNOTSUPP instead of calling
+	    stop_machine(), and the features that used it fall back to kprobes or
+	    disable themselves. Enable when building kernelsu.ko for those kernels,
+	    leave off for GKI.
+
 config KSU_TOOLKIT_SUPPORT
       bool "KernelSU toolkit support"
       depends on KSU

@@ -418,6 +418,10 @@ static int my_sel_open_handle_status(struct inode *inode, struct file *filp)
 
 static void hook_selinux_status_open()
 {
+#ifdef CONFIG_KSU_RKP_NO_PATCH_TEXT
+    pr_warn("selinux_hide: fake status needs patch_text, skipping (RKP)\n");
+    return;
+#endif
     if (orig_sel_open_handle_status)
         return;
     if (!sel_open_handle_status_slot) {
@@ -490,6 +494,14 @@ static int ksu_selinux_hide_enable()
 {
     int ret;
     pr_info("selinux_hide: init selinux hide\n");
+#ifdef CONFIG_KSU_RKP_NO_PATCH_TEXT
+    // Every hook this feature installs rewrites a pointer slot with
+    // ksu_patch_text(). On a KDP/RKP protected kernel that write is fatal, and
+    // with CONFIG_KSU_RKP_NO_PATCH_TEXT it is refused, so the feature cannot
+    // work at all. Say so instead of half-installing it.
+    pr_warn("selinux_hide: text patching disabled (RKP), feature unavailable\n");
+    return -EOPNOTSUPP;
+#endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
     if (!backup_sepolicy) {
         pr_err("no backup sepolicy available, please save feature and reboot to retry!\n");

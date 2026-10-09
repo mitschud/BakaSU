@@ -217,6 +217,14 @@ void __init ksu_syscall_hook_init(void)
 
     ksu_dispatcher_nr = ni_slot;
     ksu_syscall_table_hook(ksu_dispatcher_nr, (syscall_fn_t)ksu_syscall_dispatcher, NULL);
+    // With CONFIG_KSU_RKP_NO_PATCH_TEXT the write above is refused, and a
+    // stage-2 protected kernel may also swallow it silently. Verify the slot
+    // really points at the dispatcher before claiming it is installed.
+    if (READ_ONCE(ksu_syscall_table[ksu_dispatcher_nr]) != (syscall_fn_t)ksu_syscall_dispatcher) {
+        pr_warn("dispatcher unavailable at slot %d; syscall event hooks disabled\n", ni_slot);
+        ksu_dispatcher_nr = -1;
+        return;
+    }
     pr_info("dispatcher installed at slot %d\n", ksu_dispatcher_nr);
 }
 

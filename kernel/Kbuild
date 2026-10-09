@@ -233,6 +233,12 @@ ifeq ($(CONFIG_KSU_SAMSUNG_DEFEX),y)
 ccflags-y += -DCONFIG_KSU_SAMSUNG_DEFEX=1
 endif
 
+# Samsung RKP / KDP stage-2 write protection: never write kernel text. Off by
+# default; only meaningful on arm64 Samsung kernels (see kernel/Kconfig).
+ifeq ($(CONFIG_KSU_RKP_NO_PATCH_TEXT),y)
+ccflags-y += -DCONFIG_KSU_RKP_NO_PATCH_TEXT=1
+endif
+
 # Custom Signs
 ifdef KSU_EXPECTED_SIZE
 ccflags-y += -DEXPECTED_SIZE=$(KSU_EXPECTED_SIZE)

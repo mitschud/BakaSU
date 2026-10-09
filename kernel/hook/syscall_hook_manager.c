@@ -21,9 +21,304 @@
 #include "hook/setuid_hook.h"
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
+#include "policy/allowlist.h"
+#include "compat/kernel_compat.h"
+#include <linux/static_key.h>
 #if defined(__riscv)
 #include "hook/riscv64/syscall_regs.h"
 #endif
+
+static bool syscall_hook_manager_initialized;
+
+#if defined(CONFIG_KSU_RKP_NO_PATCH_TEXT) && defined(CONFIG_KPROBES) && defined(__aarch64__)
+/*
+ * With CONFIG_KSU_RKP_NO_PATCH_TEXT the sys_call_table must not be written, so
+ * the tracepoint -> dispatcher-slot redirect of hook/arm64/syscall_hook.c
+ * cannot work and ksu_dispatcher_nr stays -1. Everything that used to arrive
+ * through that slot is unreachable, including the whole sucompat path, so su
+ * would silently stop working.
+ *
+ * Re-implement the same hooks with kprobes instead. The kprobe sits on the
+ * function that sys_call_table[nr] points at; its pre-handler rewrites the
+ * syscall entry PC to a trampoline that runs the KSU logic and then calls the
+ * original handler through sys_call_table, exactly like the dispatcher does.
+ *
+ * Recursion guard: the trampoline calls the probed function directly, so the
+ * kprobe fires again. The real syscall number is replaced with
+ * RKP_SUCOMPAT_BYPASS_NR around that call, which tells the pre-handler to fall
+ * through and restore it.
+ */
+#define RKP_SUCOMPAT_BYPASS_NR (-2)
+
+static bool rkp_sucompat_kprobes_registered;
+
+static bool rkp_sucompat_should_redirect(int syscall_nr)
+{
+    struct pt_regs *syscall_regs = task_pt_regs(current);
+
+    if (unlikely(syscall_regs->syscallno == RKP_SUCOMPAT_BYPASS_NR)) {
+        syscall_regs->syscallno = syscall_nr;
+        return false;
+    }
+
+#ifdef KSU_COMPAT_USE_STATIC_KEY
+    if (!static_branch_unlikely(&ksu_su_compat_enabled))
+        return false;
+#else
+    if (!ksu_su_compat_enabled)
+        return false;
+#endif
+
+    return ksu_is_allow_uid_for_current(ksu_get_uid_t(current_uid()));
+}
+
+static long __nocfi rkp_sucompat_execve(const struct pt_regs *regs)
+{
+    struct pt_regs *syscall_regs = (struct pt_regs *)regs;
+    int syscall_nr = syscall_regs->syscallno;
+    long ret;
+
+    syscall_regs->syscallno = RKP_SUCOMPAT_BYPASS_NR;
+    ret = ksu_hook_execve(__NR_execve, regs);
+    syscall_regs->syscallno = syscall_nr;
+    return ret;
+}
+
+static long __nocfi rkp_sucompat_execveat(const struct pt_regs *regs)
+{
+    struct pt_regs *syscall_regs = (struct pt_regs *)regs;
+    int syscall_nr = syscall_regs->syscallno;
+    long ret;
+
+    syscall_regs->syscallno = RKP_SUCOMPAT_BYPASS_NR;
+    ret = ksu_hook_execveat(__NR_execveat, regs);
+    syscall_regs->syscallno = syscall_nr;
+    return ret;
+}
+
+static long __nocfi rkp_sucompat_newfstatat(const struct pt_regs *regs)
+{
+    struct pt_regs *syscall_regs = (struct pt_regs *)regs;
+    int syscall_nr = syscall_regs->syscallno;
+    long ret;
+
+    syscall_regs->syscallno = RKP_SUCOMPAT_BYPASS_NR;
+    ret = ksu_hook_newfstatat(__NR_newfstatat, regs);
+    syscall_regs->syscallno = syscall_nr;
+    return ret;
+}
+
+static long __nocfi rkp_sucompat_statx(const struct pt_regs *regs)
+{
+    struct pt_regs *syscall_regs = (struct pt_regs *)regs;
+    int syscall_nr = syscall_regs->syscallno;
+    long ret;
+
+    syscall_regs->syscallno = RKP_SUCOMPAT_BYPASS_NR;
+    ret = ksu_hook_newfstatat(__NR_statx, regs);
+    syscall_regs->syscallno = syscall_nr;
+    return ret;
+}
+
+static long __nocfi rkp_sucompat_faccessat(const struct pt_regs *regs)
+{
+    struct pt_regs *syscall_regs = (struct pt_regs *)regs;
+    int syscall_nr = syscall_regs->syscallno;
+    long ret;
+
+    syscall_regs->syscallno = RKP_SUCOMPAT_BYPASS_NR;
+    ret = ksu_hook_faccessat(__NR_faccessat, regs);
+    syscall_regs->syscallno = syscall_nr;
+    return ret;
+}
+
+static long __nocfi rkp_sucompat_faccessat2(const struct pt_regs *regs)
+{
+    struct pt_regs *syscall_regs = (struct pt_regs *)regs;
+    int syscall_nr = syscall_regs->syscallno;
+    long ret;
+
+    syscall_regs->syscallno = RKP_SUCOMPAT_BYPASS_NR;
+    ret = ksu_hook_faccessat(__NR_faccessat2, regs);
+    syscall_regs->syscallno = syscall_nr;
+    return ret;
+}
+
+static long __nocfi rkp_sucompat_setresuid(const struct pt_regs *regs)
+{
+    struct pt_regs *syscall_regs = (struct pt_regs *)regs;
+    int syscall_nr = syscall_regs->syscallno;
+    long ret;
+
+    syscall_regs->syscallno = RKP_SUCOMPAT_BYPASS_NR;
+    ret = ksu_hook_setresuid(__NR_setresuid, regs);
+    syscall_regs->syscallno = syscall_nr;
+    return ret;
+}
+
+static int rkp_sucompat_execve_pre_handler(struct kprobe *probe, struct pt_regs *regs)
+{
+    if (!rkp_sucompat_should_redirect(__NR_execve))
+        return 0;
+    instruction_pointer_set(regs, (unsigned long)rkp_sucompat_execve);
+    return 1;
+}
+
+static int rkp_sucompat_execveat_pre_handler(struct kprobe *probe, struct pt_regs *regs)
+{
+    if (!rkp_sucompat_should_redirect(__NR_execveat))
+        return 0;
+    instruction_pointer_set(regs, (unsigned long)rkp_sucompat_execveat);
+    return 1;
+}
+
+static int rkp_sucompat_newfstatat_pre_handler(struct kprobe *probe, struct pt_regs *regs)
+{
+    if (!rkp_sucompat_should_redirect(__NR_newfstatat))
+        return 0;
+    instruction_pointer_set(regs, (unsigned long)rkp_sucompat_newfstatat);
+    return 1;
+}
+
+static int rkp_sucompat_statx_pre_handler(struct kprobe *probe, struct pt_regs *regs)
+{
+    if (!rkp_sucompat_should_redirect(__NR_statx))
+        return 0;
+    instruction_pointer_set(regs, (unsigned long)rkp_sucompat_statx);
+    return 1;
+}
+
+static int rkp_sucompat_faccessat_pre_handler(struct kprobe *probe, struct pt_regs *regs)
+{
+    if (!rkp_sucompat_should_redirect(__NR_faccessat))
+        return 0;
+    instruction_pointer_set(regs, (unsigned long)rkp_sucompat_faccessat);
+    return 1;
+}
+
+static int rkp_sucompat_faccessat2_pre_handler(struct kprobe *probe, struct pt_regs *regs)
+{
+    if (!rkp_sucompat_should_redirect(__NR_faccessat2))
+        return 0;
+    instruction_pointer_set(regs, (unsigned long)rkp_sucompat_faccessat2);
+    return 1;
+}
+
+static int rkp_sucompat_setresuid_pre_handler(struct kprobe *probe, struct pt_regs *regs)
+{
+    if (!rkp_sucompat_should_redirect(__NR_setresuid))
+        return 0;
+    instruction_pointer_set(regs, (unsigned long)rkp_sucompat_setresuid);
+    return 1;
+}
+
+static struct kprobe rkp_sucompat_execve_kprobe = {
+    .pre_handler = rkp_sucompat_execve_pre_handler,
+};
+static struct kprobe rkp_sucompat_execveat_kprobe = {
+    .pre_handler = rkp_sucompat_execveat_pre_handler,
+};
+static struct kprobe rkp_sucompat_newfstatat_kprobe = {
+    .pre_handler = rkp_sucompat_newfstatat_pre_handler,
+};
+static struct kprobe rkp_sucompat_statx_kprobe = {
+    .pre_handler = rkp_sucompat_statx_pre_handler,
+};
+static struct kprobe rkp_sucompat_faccessat_kprobe = {
+    .pre_handler = rkp_sucompat_faccessat_pre_handler,
+};
+static struct kprobe rkp_sucompat_faccessat2_kprobe = {
+    .pre_handler = rkp_sucompat_faccessat2_pre_handler,
+};
+static struct kprobe rkp_sucompat_setresuid_kprobe = {
+    .pre_handler = rkp_sucompat_setresuid_pre_handler,
+};
+
+static int __init rkp_sucompat_hook_init(void)
+{
+    int ret;
+
+    if (!ksu_syscall_table)
+        return -ENOENT;
+
+    rkp_sucompat_execve_kprobe.addr = (kprobe_opcode_t *)READ_ONCE(ksu_syscall_table[__NR_execve]);
+    rkp_sucompat_execveat_kprobe.addr = (kprobe_opcode_t *)READ_ONCE(ksu_syscall_table[__NR_execveat]);
+    rkp_sucompat_newfstatat_kprobe.addr = (kprobe_opcode_t *)READ_ONCE(ksu_syscall_table[__NR_newfstatat]);
+    rkp_sucompat_statx_kprobe.addr = (kprobe_opcode_t *)READ_ONCE(ksu_syscall_table[__NR_statx]);
+    rkp_sucompat_faccessat_kprobe.addr = (kprobe_opcode_t *)READ_ONCE(ksu_syscall_table[__NR_faccessat]);
+    rkp_sucompat_faccessat2_kprobe.addr = (kprobe_opcode_t *)READ_ONCE(ksu_syscall_table[__NR_faccessat2]);
+    rkp_sucompat_setresuid_kprobe.addr = (kprobe_opcode_t *)READ_ONCE(ksu_syscall_table[__NR_setresuid]);
+
+    ret = register_kprobe(&rkp_sucompat_execve_kprobe);
+    if (ret)
+        goto exit_hooks;
+    ret = register_kprobe(&rkp_sucompat_execveat_kprobe);
+    if (ret)
+        goto unregister_execve;
+    ret = register_kprobe(&rkp_sucompat_newfstatat_kprobe);
+    if (ret)
+        goto unregister_execveat;
+    ret = register_kprobe(&rkp_sucompat_statx_kprobe);
+    if (ret)
+        goto unregister_newfstatat;
+    ret = register_kprobe(&rkp_sucompat_faccessat_kprobe);
+    if (ret)
+        goto unregister_statx;
+    ret = register_kprobe(&rkp_sucompat_faccessat2_kprobe);
+    if (ret)
+        goto unregister_faccessat;
+    ret = register_kprobe(&rkp_sucompat_setresuid_kprobe);
+    if (ret)
+        goto unregister_faccessat2;
+
+    rkp_sucompat_kprobes_registered = true;
+
+    // Register the probes before pulling the features up: if any probe is
+    // refused the error path only has to unwind kprobes, so it never calls
+    // into another subsystem's .exit.text (which modpost rejects). The probes
+    // are inert until ksu_sucompat_init() and the allowlist are live, because
+    // rkp_sucompat_should_redirect() bails out on both the static key and the
+    // empty allowlist.
+    ksu_setuid_hook_init();
+    ksu_sucompat_init();
+
+    pr_info("hook_manager: RKP sucompat kprobes registered\n");
+    return 0;
+
+unregister_faccessat2:
+    unregister_kprobe(&rkp_sucompat_faccessat2_kprobe);
+unregister_faccessat:
+    unregister_kprobe(&rkp_sucompat_faccessat_kprobe);
+unregister_statx:
+    unregister_kprobe(&rkp_sucompat_statx_kprobe);
+unregister_newfstatat:
+    unregister_kprobe(&rkp_sucompat_newfstatat_kprobe);
+unregister_execveat:
+    unregister_kprobe(&rkp_sucompat_execveat_kprobe);
+unregister_execve:
+    unregister_kprobe(&rkp_sucompat_execve_kprobe);
+exit_hooks:
+    pr_err("hook_manager: RKP sucompat kprobe registration failed: %d\n", ret);
+    return ret;
+}
+
+static void __exit rkp_sucompat_hook_exit(void)
+{
+    if (!rkp_sucompat_kprobes_registered)
+        return;
+    unregister_kprobe(&rkp_sucompat_setresuid_kprobe);
+    unregister_kprobe(&rkp_sucompat_faccessat2_kprobe);
+    unregister_kprobe(&rkp_sucompat_faccessat_kprobe);
+    unregister_kprobe(&rkp_sucompat_statx_kprobe);
+    unregister_kprobe(&rkp_sucompat_newfstatat_kprobe);
+    unregister_kprobe(&rkp_sucompat_execveat_kprobe);
+    unregister_kprobe(&rkp_sucompat_execve_kprobe);
+    rkp_sucompat_kprobes_registered = false;
+    ksu_sucompat_exit();
+    ksu_setuid_hook_exit();
+}
+
+#endif /* CONFIG_KSU_RKP_NO_PATCH_TEXT && CONFIG_KPROBES && __aarch64__ */
 
 #ifdef CONFIG_KRETPROBES
 
@@ -132,6 +427,18 @@ void __init ksu_syscall_hook_manager_init(void)
     int ret;
     pr_info("hook_manager: ksu_hook_manager_init called\n");
 
+    if (ksu_dispatcher_nr < 0) {
+        pr_warn("hook_manager: dispatcher unavailable; syscall event hooks disabled\n");
+#if defined(CONFIG_KSU_RKP_NO_PATCH_TEXT) && defined(CONFIG_KPROBES) && defined(__aarch64__)
+        ret = rkp_sucompat_hook_init();
+        if (ret)
+            pr_err("hook_manager: RKP sucompat hook init failed: %d\n", ret);
+#endif
+        return;
+    }
+
+    syscall_hook_manager_initialized = true;
+
 #ifdef CONFIG_KRETPROBES
     syscall_regfunc_rp = init_kretprobe("syscall_regfunc", syscall_regfunc_handler);
     syscall_unregfunc_rp = init_kretprobe("syscall_unregfunc", syscall_unregfunc_handler);
@@ -163,6 +470,15 @@ void __init ksu_syscall_hook_manager_init(void)
 void __exit ksu_syscall_hook_manager_exit(void)
 {
     pr_info("hook_manager: ksu_hook_manager_exit called\n");
+
+    if (!syscall_hook_manager_initialized) {
+#if defined(CONFIG_KSU_RKP_NO_PATCH_TEXT) && defined(CONFIG_KPROBES) && defined(__aarch64__)
+        rkp_sucompat_hook_exit();
+#endif
+        ksu_syscall_hook_exit();
+        return;
+    }
+
 #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
     unregister_trace_sys_enter(ksu_sys_enter_handler, NULL);
     tracepoint_synchronize_unregister();
